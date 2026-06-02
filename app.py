@@ -9,10 +9,7 @@ from plotly.subplots import make_subplots
 import time
 
 # Oldal beállítása
-st.set_page_config(page_title="BTC Deribit GEX Live Terminal", layout="wide", page_icon="📈")
-
-st.title("📈 BTC Deribit GEX Opció-Profil (Élő Adatok)")
-st.write("Ez az alkalmazás a nyers Open Interest (OI) adatokból becsli a GEX-et, súlyozás nélkül.")
+st.set_page_config(page_title="BTC Deribit GEX Option B View", layout="wide", page_icon="📈")
 
 # Automatikus frissítés kapcsoló a bal oldalsávban
 auto_refresh = st.sidebar.checkbox("Automatikus frissítés (60 másodpercenként)", value=True)
@@ -50,27 +47,27 @@ def load_and_calculate():
         opt_type = parts[3] # 'C' = Call, 'P' = Put
         
         try:
-            # Deribit formátum feldolgozása (pl. 26JUN26)
             expiry_date = datetime.strptime(expiry_str, '%d%b%y').replace(hour=8, minute=0, second=0)
         except Exception:
             continue
             
         time_to_expiry = expiry_date - now
-        T = time_to_expiry.total_seconds() / (365 * 24 * 3600) # Évben kifejezve
         
-        if T <= 0:
+        # SZŰRÉS: Csak a 0 és 365 nap közötti lejáratok (<= 365.0 DTE)
+        if time_to_expiry.days < 0 or time_to_expiry.days > 365:
             continue
             
+        T = time_to_expiry.total_seconds() / (365 * 24 * 3600)
+        
         rows.append({
             'strike': strike,
             'type': opt_type,
             'oi': oi,
-            'iv': iv / 100.0, # Százalékból tizedestört
+            'iv': iv / 100.0,
             'T': T
         })
         
     if not rows:
-        st.warning("Nem sikerült feldolgozni az opciós adatokat.")
         return None, spot_price
         
     df = pd.DataFrame(rows)
@@ -83,117 +80,124 @@ def calc_gamma(S, K, T, sigma):
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
     return gamma
 
-def find_gamma_flip(df_input, current_spot):
-    # Leteszteljük a szinteket a spot ár környezetében (-20% és +20% között)
-    prices = np.linspace(current_spot * 0.8, current_spot * 1.2, 200)
-    net_gex_values = []
-    
-    T = df_input['T'].values
-    K = df_input['strike'].values
-    sigma = df_input['iv'].values
-    oi = df_input['oi'].values
-    is_call = (df_input['type'] == 'C').values
-    
-    for p in prices:
-        d1 = (np.log(p / K) + (0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-        gamma = norm.pdf(d1) / (p * sigma * np.sqrt(T))
-        gex = oi * gamma * (p ** 2)
-        # Call opció pozitív, Put opció negatív előjelű a standard modellben
-        gex = np.where(is_call, gex, -gex)
-        net_gex_values.append(np.sum(gex))
-        
-    net_gex_values = np.array(net_gex_values)
-    idx = np.where(np.diff(np.sign(net_gex_values)))[0]
-    if len(idx) > 0:
-        i = idx[0]
-        p1, p2 = prices[i], prices[i+1]
-        g1, g2 = net_gex_values[i], net_gex_values[i+1]
-        return p1 - g1 * (p2 - p1) / (g2 - g1)
-    return None
-
 df, spot_price = load_and_calculate()
 
 if df is not None:
-    # Gamma és GEX számítás az aktuális spot ár mellett
     df['gamma'] = [calc_gamma(spot_price, r['strike'], r['T'], r['iv']) for _, r in df.iterrows()]
     df['gex'] = df.apply(
         lambda r: r['oi'] * r['gamma'] * (spot_price ** 2) if r['type'] == 'C' else -r['oi'] * r['gamma'] * (spot_price ** 2),
         axis=1
     )
     
-    # Szűrés a spot ár körüli releváns tartományra (+- 25%), hogy jól látható legyen a grafikon
+    # Strike-ok szűrése a spot körül (+- 25% a szép láthatóságért, mint a képen)
     min_strike = spot_price * 0.75
     max_strike = spot_price * 1.25
     df_filtered = df[(df['strike'] >= min_strike) & (df['strike'] <= max_strike)]
     
-    # Aggregáció strike árak szerint
     strike_summary = df_filtered.groupby('strike')['gex'].sum().reset_index().sort_values('strike')
+    
+    # Kumulált GEX kiszámítása a strike árak mentén haladva
     strike_summary['cumulative_gex'] = strike_summary['gex'].cumsum()
     
-    # Átváltás milliárd USD egységre (mint a képeden: 1e9)
+    # Skálázás pontosan a kép szerint: Bal oldal -> 1e9 (milliárd), Jobb oldal -> 1e10 (10 milliárd)
     strike_summary['gex_b'] = strike_summary['gex'] / 1e9
-    strike_summary['cumulative_gex_b'] = strike_summary['cumulative_gex'] / 1e9
+    strike_summary['cumulative_gex_b10'] = strike_summary['cumulative_gex'] / 1e10
     
-    flip_price = find_gamma_flip(df, spot_price)
+    # Gamma Flip meghatározása ott, ahol a kumulált vonal keresztezi a 0-t
+    flip_price = None
+    cum_vals = strike_summary['cumulative_gex'].values
+    strikes = strike_summary['strike'].values
+    idx = np.where(np.diff(np.sign(cum_vals)))[0]
+    if len(idx) > 0:
+        i = idx[0]
+        x1, x2 = strikes[i], strikes[i+1]
+        y1, y2 = cum_vals[i], cum_vals[i+1]
+        flip_price = x1 - y1 * (x2 - x1) / (y2 - y1) # Lineáris interpoláció a pontos ponthoz
     
-    # Metrikák megjelenítése a lap tetején
-    col1, col2 = st.columns(2)
-    col1.metric("Aktuális BTC Spot Ár", f"${spot_price:,.2f}")
-    if flip_price:
-        col2.metric("Becsült Gamma Flip Ár", f"${flip_price:,.2f}")
-    else:
-        col2.metric("Gamma Flip Ár", "Nem található a tartományban")
-        
-    # Grafikon felépítése (Két Y tengellyel)
+    # Grafikon felépítése fehér háttérrel
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     
-    # Oszlopok (GEX per strike) - Pozitív zöld, negatív piros
-    colors = ['#00CC96' if val >= 0 else '#EF553B' for val in strike_summary['gex_b']]
-    
+    # 1. Oszlopok: Egységes világoskék (Near-expiry GEX)
     fig.add_trace(
         go.Bar(
             x=strike_summary['strike'],
             y=strike_summary['gex_b'],
-            name="GEX Strike-onként",
-            marker_color=colors,
-            opacity=0.8
+            name=f"Near-expiry GEX (<= 365.0 DTE)",
+            marker_color='rgba(143, 186, 217, 0.75)', # Pontosan az a matt világoskék
+            marker_line=dict(color='rgba(143, 186, 217, 1)', width=0.5),
+            opacity=0.9
         ),
         secondary_y=False
     )
     
-    # Kumulált vonal (Cumulative GEX)
+    # 2. Vonal: Kumulált sötétebb kék vonal (Cumulative near-expiry GEX)
     fig.add_trace(
         go.Scatter(
             x=strike_summary['strike'],
-            y=strike_summary['cumulative_gex_b'],
-            name="Kumulált GEX",
-            line=dict(color='#AB63FA', width=3),
+            y=strike_summary['cumulative_gex_b10'],
+            name="Cumulative near-expiry GEX",
+            line=dict(color='#2B7BBA', width=2.5),
             mode='lines'
         ),
         secondary_y=True
     )
     
-    # Függőleges vonalak az áraknak
-    fig.add_vline(x=spot_price, line_width=2, line_dash="dash", line_color="#636EFA", annotation_text="Spot Ár")
-    if flip_price:
-        fig.add_vline(x=flip_price, line_width=2, line_dash="dot", line_color="#FFA15A", annotation_text="Gamma Flip")
-        
-    fig.update_layout(
-        title="BTC Deribit GEX Opciós Profil (Minden Lejárat Összesítve)",
-        xaxis_title="Strike Ár ($)",
-        template="plotly_dark",
-        height=650,
-        legend=dict(x=0.01, y=0.99)
+    # 3. Függőleges vonal a Spot árnak
+    fig.add_vline(
+        x=spot_price, 
+        line_width=1.5, 
+        line_color="#1F4E79", 
+        name=f"Spot {spot_price:,.0f}"
     )
     
-    fig.update_yaxes(title_text="GEX Strike-onként (Milliárd $)", secondary_y=False)
-    fig.update_yaxes(title_text="Kumulált GEX (Milliárd $)", secondary_y=True)
+    # Dummy trace-ek csak azért, hogy a jelmagyarázat (Legend) pontosan úgy nézzen ki, mint a képen
+    fig.add_trace(go.Scatter(x=[None], y=[None], mode='lines', line=dict(color='#1F4E79', width=1.5), name=f"Spot {spot_price:,.0f}"), secondary_y=False)
     
+    # 4. A Gamma Flip PÖTTY a kumulált vonalon (ha létezik a tartományban)
+    if flip_price:
+        fig.add_trace(
+            go.Scatter(
+                x=[flip_price],
+                y=[0], # A nullvonalon metszi egymást
+                mode='markers',
+                marker=dict(color='#005A9C', size=11, symbol='circle'),
+                name=f"Intraday gamma flip {flip_price:,.0f}"
+            ),
+            secondary_y=True
+        )
+        
+    # Vízszintes nullvonal (X tengely kiemelése)
+    fig.add_hline(y=0, line_width=1, line_color="#7F7F7F")
+    
+    # Dizájn beállítások: Fehér háttér, pontos feliratok
+    fig.update_layout(
+        title={
+            'text': "<b>BTC Deribit GEX Option B View</b><br><span style='font-size:13px;color:gray;'>Bars = near-expiry GEX (<= 365.0 DTE) | Line = cumulative near-expiry</span>",
+            'y':0.95, 'x':0.5, 'xanchor': 'center', 'yanchor': 'top'
+        },
+        xaxis_title="Strike",
+        template="plotly_white",
+        height=700,
+        grid=dict(rows=1, columns=1),
+        legend=dict(
+            x=0.01, y=0.99,
+            bgcolor="rgba(255,255,255,0.8)",
+            bordercolor="rgba(0,0,0,0.1)",
+            borderwidth=1
+        ),
+        margin=dict(t=100, b=50, l=50, r=50)
+    )
+    
+    # Tengelyek feliratai és formázása (1e9 és 1e10 jelölések imitálása)
+    fig.update_yaxes(title_text="Near-expiry GEX by strike (x10⁹)", secondary_y=False, showgrid=True, gridcolor='#E5E5E5')
+    fig.update_yaxes(title_text="Cumulative GEX (x10¹⁰)", secondary_y=True, showgrid=False)
+    fig.update_xaxes(showgrid=True, gridcolor='#E5E5E5', tickformat=",.0f")
+    
+    # Megjelenítés a böngészőben
     st.plotly_chart(fig, use_container_width=True)
 
-st.write(f"Utolsó frissítés (UTC): {datetime.utcnow().strftime('%H:%M:%S')}")
+st.caption(f"Utolsó frissítés (UTC): {datetime.utcnow().strftime('%H:%M:%S')}")
 
-# Alvás és automatikus újrafuttatás
 if auto_refresh:
     time.sleep(60)
     st.rerun()
