@@ -82,18 +82,18 @@ def calc_gamma(S, K, T, sigma):
 df, spot_price = load_and_calculate()
 
 if df is not None:
-    # Gamma és GEX alapértékek kiszámítása
+    # Gamma és GEX számítások
     df['gamma'] = [calc_gamma(spot_price, r['strike'], r['T'], r['iv']) for _, r in df.iterrows()]
     df['gex'] = df.apply(
         lambda r: r['oi'] * r['gamma'] * (spot_price ** 2) if r['type'] == 'C' else -r['oi'] * r['gamma'] * (spot_price ** 2),
         axis=1
     )
     
-    # Összegzés a teljes piacon (így lesz tökéletes az S-görbe alakja)
+    # Teljes piaci összesítés a sima kumulatív vonalhoz
     all_strikes = df.groupby('strike')['gex'].sum().reset_index().sort_values('strike')
     all_strikes['cumulative_gex'] = all_strikes['gex'].cumsum()
     
-    # Valódi Gamma Flip meghatározása
+    # Gamma Flip pontos meghatározása
     flip_price = None
     cum_vals = all_strikes['cumulative_gex'].values
     strikes = all_strikes['strike'].values
@@ -105,20 +105,20 @@ if df is not None:
         if y2 != y1:
             flip_price = x1 - y1 * (x2 - x1) / (y2 - y1)
     
-    # Nézet levágása a Spot köré (+-25%)
+    # +-25%-os Spot környéki ablak kivágása a megjelenítéshez
     min_strike = spot_price * 0.75
     max_strike = spot_price * 1.25
     strike_summary = all_strikes[(all_strikes['strike'] >= min_strike) & (all_strikes['strike'] <= max_strike)].copy()
 
-    # --- MATPLOTLIB PROFI STYLING ---
+    # --- MATPLOTLIB PRÉMIUM STYLING ---
     plt.rcParams['figure.facecolor'] = 'white'
     fig, ax1 = plt.subplots(figsize=(12, 6.5))
     ax1.set_facecolor('white')
     
-    # Oszlopok szélessége (kicsit keskenyebb, hogy elegánsabb legyen)
-    bar_width = 300
+    # Oszlopszélesség finomítása
+    bar_width = 350 if len(strike_summary) > 0 else 500
     
-    # 1. Bal oldali Y tengely: Bars (Körvonal nélkül, tiszta lapos dizájn)
+    # 1. Bal tengely: Oszlopok (edgecolor='none' -> nincs sötét keret, tiszta felületek)
     bar_color = '#8fbad9'
     bars = ax1.bar(strike_summary['strike'], strike_summary['gex'], width=bar_width, 
                   color=bar_color, alpha=0.75, edgecolor='none')
@@ -126,58 +126,54 @@ if df is not None:
     ax1.set_xlabel('Strike', fontsize=10, labelpad=8)
     ax1.set_ylabel('Near-expiry GEX by strike', fontsize=10, labelpad=8)
     
-    # 2. Jobb oldali Y tengely: Line
+    # 2. Jobb tengely: Kumulatív vonal
     ax2 = ax1.twinx()
     line_color = '#2b7bba'
     line, = ax2.plot(strike_summary['strike'], strike_summary['cumulative_gex'], 
                      color=line_color, linewidth=1.6)
     ax2.set_ylabel('Cumulative GEX', fontsize=10, labelpad=8)
     
-    # --- ASZIMMETRIKUS NULLPONTVONAL IGAZÍTÁS (A tökéletes másolat kulcsa) ---
-    y1_min, y1_max = strike_summary['gex'].min(), strike_summary['gex'].max()
-    y2_min, y2_max = strike_summary['cumulative_gex'].min(), strike_summary['cumulative_gex'].max()
+    # --- MATEMATIKAI NULLVONAL-ÖSSZEHANGOLÁS (A pixelpontos egyezés titka) ---
+    y1_min, y1_max = min(strike_summary['gex'].min(), 0), max(strike_summary['gex'].max(), 0)
+    y2_min, y2_max = min(strike_summary['cumulative_gex'].min(), 0), max(strike_summary['cumulative_gex'].max(), 0)
     
-    # Legyen benne a nullvonal biztonságosan
-    y1_min, y1_max = min(0, y1_min), max(0, y1_max)
-    y2_min, y2_max = min(0, y2_min), max(0, y2_max)
+    # Kis ráhagyás (padding)
+    y1_min -= 0.1 * (y1_max - y1_min if y1_max != y1_min else 1.0)
+    y1_max += 0.1 * (y1_max - y1_min if y1_max != y1_min else 1.0)
+    y2_min -= 0.1 * (y2_max - y2_min if y2_max != y2_min else 1.0)
+    y2_max += 0.1 * (y2_max - y2_min if y2_max != y2_min else 1.0)
     
-    # Adjunk hozzá 15% extra mozgásteret felül és alul
-    y1_min *= 1.15 if y1_min < 0 else 1.0
-    y1_max *= 1.15 if y1_max > 0 else 1.0
-    y2_min *= 1.15 if y2_min < 0 else 1.0
-    y2_max *= 1.15 if y2_max > 0 else 1.0
+    # Meghatározzuk, hogy a nullvonal hol helyezkedjen el százalékosan az ablak aljától
+    p1 = -y1_min / (y1_max - y1_min) if (y1_max - y1_min) != 0 else 0.5
+    p2 = -y2_min / (y2_max - y2_min) if (y2_max - y2_min) != 0 else 0.5
+    p = max(p1, p2) # Biztonságos maximum, ami mindkét adatsort lefedi
     
-    # Arányosítás: beállítjuk, hogy a negatív tartomány aránya mindkét oldalon pontosan ugyanakkora legyen
-    if y1_max > 0 and y2_max > 0:
-        ratio1 = y1_min / y1_max
-        ratio2 = y2_min / y2_max
-        if ratio1 < ratio2:
-            y2_min = y2_max * ratio1
-        else:
-            y1_min = y1_max * ratio2
-            
+    # Tengelyhatárok újraszámítása az egységes nullvonal pozíció (p) szerint
+    if y1_max > 0: y1_min = -p * y1_max / (1 - p)
+    if y2_max > 0: y2_min = -p * y2_max / (1 - p)
+    
     ax1.set_ylim(y1_min, y1_max)
     ax2.set_ylim(y2_min, y2_max)
     
-    # Vízszintes vékony nullvonal (hajszálpontosan a helyén)
+    # Vízszintes tiszta nullvonal (hajszálvékony kék)
     ax1.axhline(0, color='#4682b4', linewidth=0.7, alpha=0.6)
     
-    # Függőleges finom sötétkék Spot vonal (pont mint a célképen)
+    # Függőleges vékony sötétkék Spot vonal
     spot_line = ax1.axvline(spot_price, color='#1f4e79', linewidth=0.8, alpha=0.8)
     
-    # Gamma Flip sötétkék pont elhelyezése
+    # Gamma Flip pötty a vonalon (pontosan ott, ahol a sötétkék vonal metszi a nullát)
     flip_dot = None
     if flip_price and (min_strike <= flip_price <= max_strike):
-        flip_dot, = ax2.plot(flip_price, 0, marker='o', color='#1f4e79', 
-                             markersize=7.5, linestyle='None')
+        flip_dot, = ax2.plot(flip_price, 0, marker='o', color='#2b7bba', 
+                             markersize=7.5, linestyle='None', markeredgecolor='#1f4e79', markeredgewidth=0.5)
 
-    # X-tengely formázása tiszta ezres számokkal (pl. 75000)
+    # Számformátumok (pl. 75000 tisztán, vesszők nélkül az X tengelyen)
     ax1.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:.0f}".format(x)))
     
     ax1.tick_params(axis='both', which='major', labelsize=9)
     ax2.tick_params(axis='y', which='major', labelsize=9)
     
-    # Jelmagyarázat (Legend) precíz formázással
+    # Jelmagyarázat pontos feliratokkal
     handles = [spot_line, bars, line]
     labels = [
         f"Spot {spot_price:,.0f}",
@@ -192,7 +188,7 @@ if df is not None:
     ax1.legend(handles, labels, loc='upper left', frameon=True, 
                facecolor='white', edgecolor='#e5e5e5', fontsize=9)
     
-    # Cím beállítása két sorban, pontosan az eredeti szövegezéssel
+    # Kétsoros precíz főcím
     plt.title("BTC Deribit GEX Option B View\nBars = near-expiry GEX (<= 365.0 DTE) | Line = cumulative near-expiry", 
               fontsize=10, pad=12, ha='center', linespacing=1.2)
     
