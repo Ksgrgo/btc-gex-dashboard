@@ -89,13 +89,11 @@ if df is not None:
         axis=1
     )
     
-    # --- KRITIKUS JAVÍTÁS ---
-    # Először a TELJES piacon összegezzük és halmozzuk (cumsum) a GEX-et, 
-    # így a görbe alakja és kiindulópontja hajszálpontosan megegyezik az eredetivel!
+    # Először a TELJES piacon összegezzük és halmozzuk (cumsum) a GEX-et
     all_strikes = df.groupby('strike')['gex'].sum().reset_index().sort_values('strike')
     all_strikes['cumulative_gex'] = all_strikes['gex'].cumsum()
     
-    # Valódi Gamma Flip meghatározása a teljes láncon (ahol a kumulatív érték keresztezi a 0-át)
+    # Valódi Gamma Flip meghatározása a teljes láncon
     flip_price = None
     cum_vals = all_strikes['cumulative_gex'].values
     strikes = all_strikes['strike'].values
@@ -107,12 +105,12 @@ if df is not None:
         if y2 != y1:
             flip_price = x1 - y1 * (x2 - x1) / (y2 - y1)
     
-    # Most vágjuk le a nézetet a Spot köré (+-25%), pontosan úgy, mint a mintaképen
+    # Nézet levágása a Spot köré (+-25%)
     min_strike = spot_price * 0.75
     max_strike = spot_price * 1.25
     strike_summary = all_strikes[(all_strikes['strike'] >= min_strike) & (all_strikes['strike'] <= max_strike)].copy()
 
-    # --- MATPLOTLIB FIX STYLING ---
+    # --- MATPLOTLIB STYLING ---
     plt.rcParams['figure.facecolor'] = 'white'
     fig, ax1 = plt.subplots(figsize=(12, 6.5))
     ax1.set_facecolor('white')
@@ -120,7 +118,7 @@ if df is not None:
     # Oszlopok szélessége
     bar_width = 400 if len(strike_summary) > 0 else 500
     
-    # 1. Bal oldali Y tengely: Bars (Near-expiry GEX) - Matt világoskék szín
+    # 1. Bal oldali Y tengely: Bars (Near-expiry GEX)
     bar_color = '#8fbad9'
     bars = ax1.bar(strike_summary['strike'], strike_summary['gex'], width=bar_width, 
                   color=bar_color, alpha=0.85, edgecolor=bar_color, linewidth=0.3)
@@ -135,7 +133,7 @@ if df is not None:
                      color=line_color, linewidth=1.8)
     ax2.set_ylabel('Cumulative GEX', fontsize=10, labelpad=8)
     
-    # Dinamikus tengely-összehangolás, hogy a két oldal 0-pontja szigorúan egy vonalba essen
+    # Tengelyek szimmetrikus igazítása, hogy a 0 szint tökéletesen egy vonalba essen
     gex_max_val = max(abs(strike_summary['gex'].min()), abs(strike_summary['gex'].max()))
     cum_max_val = max(abs(strike_summary['cumulative_gex'].min()), abs(strike_summary['cumulative_gex'].max()))
     
@@ -148,18 +146,20 @@ if df is not None:
     # Függőleges sötétkék Spot vonal
     spot_line = ax1.axvline(spot_price, color='#1f4e79', linewidth=1.0, alpha=0.9)
     
-    # Gamma Flip sötétkék pont elhelyezése a vonalon (ha benne van a nézetben)
+    # Gamma Flip sötétkék pont elhelyezése
     flip_dot = None
     if flip_price and (min_strike <= flip_price <= max_strike):
         flip_dot, = ax2.plot(flip_price, 0, marker='o', color='#1f4e79', 
                              markersize=8, linestyle='None')
 
-    # X-tengely formázása: tiszta számok ezres elválasztó vessző nélkül (pl. 65000)
+    # X-tengely formázása tiszta számokkal (vesszők nélkül)
     ax1.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:.0f}".format(x)))
-    ax1.tick_params(axis='both', which='major', labels_include_to_zero=False, labelsize=9)
+    
+    # JAVÍTOTT SOR: Kiszedtem a hibás paramétert
+    ax1.tick_params(axis='both', which='major', labelsize=9)
     ax2.tick_params(axis='y', which='major', labelsize=9)
     
-    # Jelmagyarázat (Legend) pontos feliratokkal és vesszős számformátummal a dobozban
+    # Jelmagyarázat összeállítása
     handles = [spot_line, bars, line]
     labels = [
         f"Spot {spot_price:,.0f}",
@@ -174,7 +174,7 @@ if df is not None:
     ax1.legend(handles, labels, loc='upper left', frameon=True, 
                facecolor='white', edgecolor='#e5e5e5', fontsize=9.5)
     
-    # Cím beállítása pontosan az eredeti szövegezéssel
+    # Cím
     plt.title("BTC Deribit GEX Option B View\nBars = near-expiry GEX (<= 365.0 DTE) | Line = cumulative near-expiry", 
               fontsize=10.5, pad=12, ha='center', linespacing=1.2)
     
