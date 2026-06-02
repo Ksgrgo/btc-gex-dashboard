@@ -82,47 +82,48 @@ def calc_gamma(S, K, T, sigma):
 df, spot_price = load_and_calculate()
 
 if df is not None:
-    # Gamma és GEX számítás
+    # Gamma és GEX alapértékek kiszámítása
     df['gamma'] = [calc_gamma(spot_price, r['strike'], r['T'], r['iv']) for _, r in df.iterrows()]
     df['gex'] = df.apply(
         lambda r: r['oi'] * r['gamma'] * (spot_price ** 2) if r['type'] == 'C' else -r['oi'] * r['gamma'] * (spot_price ** 2),
         axis=1
     )
     
-    # Strike árak szűrése a Spot körül az azonos nézetért (+-25%)
-    min_strike = spot_price * 0.75
-    max_strike = spot_price * 1.25
-    df_filtered = df[(df['strike'] >= min_strike) & (df['strike'] <= max_strike)]
+    # --- KRITIKUS JAVÍTÁS ---
+    # Először a TELJES piacon összegezzük és halmozzuk (cumsum) a GEX-et, 
+    # így a görbe alakja és kiindulópontja hajszálpontosan megegyezik az eredetivel!
+    all_strikes = df.groupby('strike')['gex'].sum().reset_index().sort_values('strike')
+    all_strikes['cumulative_gex'] = all_strikes['gex'].cumsum()
     
-    strike_summary = df_filtered.groupby('strike')['gex'].sum().reset_index().sort_values('strike')
-    strike_summary['cumulative_gex'] = strike_summary['gex'].cumsum()
-    
-    # Gamma Flip kiszámítása (ahol a kumulatív érték keresztezi a 0-át)
+    # Valódi Gamma Flip meghatározása a teljes láncon (ahol a kumulatív érték keresztezi a 0-át)
     flip_price = None
-    cum_vals = strike_summary['cumulative_gex'].values
-    strikes = strike_summary['strike'].values
+    cum_vals = all_strikes['cumulative_gex'].values
+    strikes = all_strikes['strike'].values
     idx = np.where(np.diff(np.sign(cum_vals)))[0]
     if len(idx) > 0:
         i = idx[0]
         x1, x2 = strikes[i], strikes[i+1]
         y1, y2 = cum_vals[i], cum_vals[i+1]
-        flip_price = x1 - y1 * (x2 - x1) / (y2 - y1)
+        if y2 != y1:
+            flip_price = x1 - y1 * (x2 - x1) / (y2 - y1)
+    
+    # Most vágjuk le a nézetet a Spot köré (+-25%), pontosan úgy, mint a mintaképen
+    min_strike = spot_price * 0.75
+    max_strike = spot_price * 1.25
+    strike_summary = all_strikes[(all_strikes['strike'] >= min_strike) & (all_strikes['strike'] <= max_strike)].copy()
 
-    # --- MATPLOTLIB GRAFIKON ÉPÍTÉSE (Hajszálpontos másolat) ---
+    # --- MATPLOTLIB FIX STYLING ---
     plt.rcParams['figure.facecolor'] = 'white'
     fig, ax1 = plt.subplots(figsize=(12, 6.5))
-    
-    # Háttér és rács kikapcsolása / minimalizálása, mint a képen
     ax1.set_facecolor('white')
     
-    # Dinamikus oszlopszélesség a szép megjelenésért
+    # Oszlopok szélessége
     bar_width = 400 if len(strike_summary) > 0 else 500
     
-    # 1. Bal oldali Y tengely: Bars (Near-expiry GEX)
-    # Szín: az a jellegzetes matt steel-blue / világoskék
-    bar_color = '#79add2'
+    # 1. Bal oldali Y tengely: Bars (Near-expiry GEX) - Matt világoskék szín
+    bar_color = '#8fbad9'
     bars = ax1.bar(strike_summary['strike'], strike_summary['gex'], width=bar_width, 
-                  color=bar_color, alpha=0.75, edgecolor=bar_color, linewidth=0.5)
+                  color=bar_color, alpha=0.85, edgecolor=bar_color, linewidth=0.3)
     
     ax1.set_xlabel('Strike', fontsize=10, labelpad=8)
     ax1.set_ylabel('Near-expiry GEX by strike', fontsize=10, labelpad=8)
@@ -134,45 +135,50 @@ if df is not None:
                      color=line_color, linewidth=1.8)
     ax2.set_ylabel('Cumulative GEX', fontsize=10, labelpad=8)
     
-    # Vízszintes nullvonal
-    ax1.axhline(0, color='#4682b4', linewidth=0.8, alpha=0.7)
+    # Dinamikus tengely-összehangolás, hogy a két oldal 0-pontja szigorúan egy vonalba essen
+    gex_max_val = max(abs(strike_summary['gex'].min()), abs(strike_summary['gex'].max()))
+    cum_max_val = max(abs(strike_summary['cumulative_gex'].min()), abs(strike_summary['cumulative_gex'].max()))
     
-    # Függőleges Spot vonal
-    spot_line = ax1.axvline(spot_price, color='#2b7bba', linewidth=1.0, alpha=0.9)
+    ax1.set_ylim(-gex_max_val * 1.2, gex_max_val * 1.2)
+    ax2.set_ylim(-cum_max_val * 1.2, cum_max_val * 1.2)
     
-    # Intraday Gamma Flip sötétkék pötty a nullvonalon
+    # Vízszintes tiszta nullvonal
+    ax1.axhline(0, color='#4682b4', linewidth=0.6, alpha=0.5)
+    
+    # Függőleges sötétkék Spot vonal
+    spot_line = ax1.axvline(spot_price, color='#1f4e79', linewidth=1.0, alpha=0.9)
+    
+    # Gamma Flip sötétkék pont elhelyezése a vonalon (ha benne van a nézetben)
     flip_dot = None
-    if flip_price:
-        flip_dot, = ax2.plot(flip_price, 0, marker='o', color='#005a9c', 
-                             markersize=9, linestyle='None')
+    if flip_price and (min_strike <= flip_price <= max_strike):
+        flip_dot, = ax2.plot(flip_price, 0, marker='o', color='#1f4e79', 
+                             markersize=8, linestyle='None')
 
-    # Tengelyek formázása (Matplotlib automatikusan kirakja az 1e9 és 1e10 szorzókat felülre!)
-    ax1.tick_params(axis='both', which='major', labelsize=9)
+    # X-tengely formázása: tiszta számok ezres elválasztó vessző nélkül (pl. 65000)
+    ax1.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, loc: "{:.0f}".format(x)))
+    ax1.tick_params(axis='both', which='major', labels_include_to_zero=False, labelsize=9)
     ax2.tick_params(axis='y', which='major', labelsize=9)
     
-    # Jelmagyarázat (Legend) manuális felépítése pontos sorrendben és feliratokkal
+    # Jelmagyarázat (Legend) pontos feliratokkal és vesszős számformátummal a dobozban
     handles = [spot_line, bars, line]
     labels = [
-        f"Spot {spot_price:,.0f}".replace(",", ""),
+        f"Spot {spot_price:,.0f}",
         "Near-expiry GEX (<= 365.0 DTE)",
         "Cumulative near-expiry GEX"
     ]
     
-    if flip_dot:
+    if flip_dot and flip_price:
         handles.append(flip_dot)
-        labels.append(f"Intraday gamma flip {flip_price:,.0f}".replace(",", ""))
+        labels.append(f"Intraday gamma flip {flip_price:,.0f}")
         
     ax1.legend(handles, labels, loc='upper left', frameon=True, 
-               facecolor='white', edgecolor='#d3d3d3', fontsize=9.5)
+               facecolor='white', edgecolor='#e5e5e5', fontsize=9.5)
     
-    # Cím és alcím beállítása
+    # Cím beállítása pontosan az eredeti szövegezéssel
     plt.title("BTC Deribit GEX Option B View\nBars = near-expiry GEX (<= 365.0 DTE) | Line = cumulative near-expiry", 
-              fontsize=11, pad=15, linespacing=1.3)
+              fontsize=10.5, pad=12, ha='center', linespacing=1.2)
     
-    # Szoros illeszkedés a szélekhez
     plt.tight_layout()
-    
-    # Megjelenítés Streamlitben static képként (így a design fix marad)
     st.pyplot(fig)
 
 st.caption(f"Utolsó frissítés (UTC): {datetime.utcnow().strftime('%H:%M:%S')}")
